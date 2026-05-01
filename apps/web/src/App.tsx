@@ -1,6 +1,16 @@
 import { startTransition, useDeferredValue, useEffect, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+function resolveApiBase(): string {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("apiBase") ?? import.meta.env.VITE_API_BASE_URL ?? "http://127.0.0.1:8000";
+}
+
+const API_BASE = resolveApiBase();
+
+type ProviderSurface = "realtime" | "telephony" | "tooling" | "analytics";
+type ProviderName = "openai" | "gemini" | "twilio" | "custom" | "local";
+type ToolKind = "crm" | "calendar" | "sms" | "webhook" | "handoff" | "lookup";
+type ToolExecutionStatus = "simulated" | "completed" | "skipped" | "error";
 
 type ContactProfile = {
   id: string;
@@ -33,7 +43,7 @@ type DashboardMetric = {
   tone: "primary" | "neutral" | "warning";
 };
 
-type PlatformSurface = {
+type PlatformSurfaceCard = {
   surface: string;
   purpose: string;
 };
@@ -50,6 +60,10 @@ type RuntimeHealth = {
   output_audio_format: string;
   transcription_model: string;
   turn_detection_mode: string;
+  active_realtime_profile: string | null;
+  active_telephony_profile: string | null;
+  tool_integrations_enabled: number;
+  byo_realtime_ready: boolean;
 };
 
 type DashboardSummary = {
@@ -60,7 +74,7 @@ type DashboardSummary = {
   agent_profiles: AgentProfile[];
   provider_defaults: Record<string, string>;
   compliance_rules: string[];
-  platform_surfaces: PlatformSurface[];
+  platform_surfaces: PlatformSurfaceCard[];
   runtime_health: RuntimeHealth;
 };
 
@@ -72,7 +86,7 @@ type ComplianceResult = {
 };
 
 type RealtimeTrace = {
-  provider: "openai" | "local";
+  provider: ProviderName;
   model: string;
   event: string;
   confidence: number;
@@ -81,11 +95,64 @@ type RealtimeTrace = {
 };
 
 type StreamEvent = {
-  source: "twilio" | "openai" | "system";
+  source: "twilio" | "openai" | "system" | "tool";
   event: string;
   detail: string;
   timestamp: string;
   payload_preview: Record<string, unknown>;
+};
+
+type ToolExecutionRecord = {
+  execution_id: string;
+  tool_id: string;
+  tool_name: string;
+  status: ToolExecutionStatus;
+  reason: string;
+  session_id: string | null;
+  timestamp: string;
+  input_payload: Record<string, unknown>;
+  output_payload: Record<string, unknown>;
+};
+
+type ProviderProfile = {
+  profile_id: string;
+  name: string;
+  provider: ProviderName;
+  surface: ProviderSurface;
+  active: boolean;
+  ready: boolean;
+  auth_source: "environment" | "vault" | "unset";
+  masked_secret: string | null;
+  account_label: string | null;
+  model: string | null;
+  endpoint: string | null;
+  notes: string;
+  readiness_notes: string[];
+  metadata: Record<string, string>;
+};
+
+type ToolIntegration = {
+  tool_id: string;
+  name: string;
+  kind: ToolKind;
+  description: string;
+  enabled: boolean;
+  requires_network: boolean;
+  mapped_functions: string[];
+  endpoint_url: string | null;
+  http_method: "GET" | "POST";
+  auth_profile_id: string | null;
+  static_headers: Record<string, string>;
+  expected_fields: string[];
+  simulator_response: string;
+  last_result_summary: string;
+};
+
+type RuntimeConfigurationView = {
+  provider_profiles: ProviderProfile[];
+  tool_integrations: ToolIntegration[];
+  active_realtime_profile_id: string | null;
+  active_telephony_profile_id: string | null;
 };
 
 type SessionRuntime = {
@@ -103,6 +170,11 @@ type SessionRuntime = {
   last_output_transcript: string;
   last_tool_name: string | null;
   last_tool_arguments: string | null;
+  last_tool_status: ToolExecutionStatus | null;
+  last_tool_result: string | null;
+  tool_execution_count: number;
+  provider_profile_id: string | null;
+  telephony_profile_id: string | null;
   last_error: string | null;
 };
 
@@ -126,6 +198,9 @@ type SessionPayload = {
   websocket_path: string;
   runtime: SessionRuntime;
   events: StreamEvent[];
+  tool_executions: ToolExecutionRecord[];
+  provider_profile_id: string | null;
+  telephony_profile_id: string | null;
 };
 
 type AgentReply = {
@@ -168,6 +243,52 @@ type ClientSecretResponse = {
   preview_reason: string | null;
 };
 
+type ProviderFormState = {
+  name: string;
+  provider: ProviderName;
+  surface: ProviderSurface;
+  api_key: string;
+  account_sid: string;
+  auth_token: string;
+  from_number: string;
+  model: string;
+  endpoint: string;
+  notes: string;
+};
+
+type ToolFormState = {
+  name: string;
+  kind: ToolKind;
+  description: string;
+  mapped_functions: string;
+  endpoint_url: string;
+  auth_profile_id: string;
+  simulator_response: string;
+};
+
+const defaultProviderForm: ProviderFormState = {
+  name: "",
+  provider: "openai",
+  surface: "realtime",
+  api_key: "",
+  account_sid: "",
+  auth_token: "",
+  from_number: "",
+  model: "gpt-realtime",
+  endpoint: "https://api.openai.com/v1/realtime",
+  notes: "",
+};
+
+const defaultToolForm: ToolFormState = {
+  name: "",
+  kind: "webhook",
+  description: "",
+  mapped_functions: "post_custom_webhook",
+  endpoint_url: "",
+  auth_profile_id: "",
+  simulator_response: "Diagnostic run completed in simulator mode.",
+};
+
 async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`);
   if (!response.ok) {
@@ -201,6 +322,8 @@ function formatTimestamp(value: string | null | undefined): string {
 
 function App() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfigurationView | null>(null);
+  const [toolHistory, setToolHistory] = useState<ToolExecutionRecord[]>([]);
   const [sessionLedger, setSessionLedger] = useState<SessionPayload[]>([]);
   const [activeContactId, setActiveContactId] = useState("contact-001");
   const [activeAgentProfileId, setActiveAgentProfileId] = useState("agent-sales");
@@ -209,11 +332,16 @@ function App() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [clientSecretResult, setClientSecretResult] = useState<ClientSecretResponse | null>(null);
   const [composer, setComposer] = useState("Please schedule me for tomorrow afternoon.");
+  const [providerForm, setProviderForm] = useState<ProviderFormState>(defaultProviderForm);
+  const [toolForm, setToolForm] = useState<ToolFormState>(defaultToolForm);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const deferredComposer = useDeferredValue(composer);
 
-  async function refreshDashboard(): Promise<void> {
+  const activeRealtimeProfileId = runtimeConfig?.active_realtime_profile_id ?? null;
+  const activeTelephonyProfileId = runtimeConfig?.active_telephony_profile_id ?? null;
+
+  const refreshDashboard = async (): Promise<void> => {
     const dashboard = await apiGet<DashboardSummary>("/api/dashboard/summary");
     startTransition(() => {
       setSummary(dashboard);
@@ -224,23 +352,35 @@ function App() {
         setActiveAgentProfileId((current) => current || dashboard.agent_profiles[0].id);
       }
     });
-  }
+  };
 
-  async function refreshSessions(): Promise<void> {
+  const refreshRuntimeConfig = async (): Promise<void> => {
+    const payload = await apiGet<RuntimeConfigurationView>("/api/runtime/config");
+    startTransition(() => {
+      setRuntimeConfig(payload);
+    });
+  };
+
+  const refreshToolHistory = async (): Promise<void> => {
+    const payload = await apiGet<ToolExecutionRecord[]>("/api/tools/executions");
+    startTransition(() => {
+      setToolHistory(payload);
+    });
+  };
+
+  const refreshSessions = async (): Promise<void> => {
     const payload = await apiGet<SessionCollectionView>("/api/sessions");
     startTransition(() => {
       setSessionLedger(payload.sessions);
     });
-  }
+  };
 
   useEffect(() => {
-    void (async () => {
-      try {
-        await Promise.all([refreshDashboard(), refreshSessions()]);
-      } catch (fetchError) {
+    void Promise.all([refreshDashboard(), refreshRuntimeConfig(), refreshToolHistory(), refreshSessions()]).catch(
+      (fetchError) => {
         setError(fetchError instanceof Error ? fetchError.message : "Unable to load dashboard.");
-      }
-    })();
+      },
+    );
   }, []);
 
   useEffect(() => {
@@ -253,6 +393,8 @@ function App() {
         const plan = await apiPost<SessionPlan>("/api/session-plan", {
           contact_id: activeContactId,
           agent_profile_id: activeAgentProfileId,
+          provider_profile_id: activeRealtimeProfileId,
+          telephony_profile_id: activeTelephonyProfileId,
         });
         startTransition(() => {
           setSessionPlan(plan);
@@ -261,12 +403,12 @@ function App() {
         setError(fetchError instanceof Error ? fetchError.message : "Unable to load session plan.");
       }
     })();
-  }, [activeContactId, activeAgentProfileId]);
+  }, [activeAgentProfileId, activeContactId, activeRealtimeProfileId, activeTelephonyProfileId]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      void refreshSessions().catch(() => undefined);
-    }, 3000);
+      void Promise.all([refreshSessions(), refreshToolHistory()]).catch(() => undefined);
+    }, 3500);
     return () => window.clearInterval(interval);
   }, []);
 
@@ -277,12 +419,14 @@ function App() {
       const session = await apiPost<SessionView>("/api/sessions", {
         contact_id: activeContactId,
         agent_profile_id: activeAgentProfileId,
+        provider_profile_id: activeRealtimeProfileId,
+        telephony_profile_id: activeTelephonyProfileId,
       });
       startTransition(() => {
         setSessionView(session);
         setSelectedSessionId(session.session.session_id);
       });
-      await refreshSessions();
+      await Promise.all([refreshSessions(), refreshToolHistory()]);
     } catch (fetchError) {
       setError(fetchError instanceof Error ? fetchError.message : "Unable to start simulator.");
     } finally {
@@ -297,6 +441,8 @@ function App() {
       const payload = await apiPost<ClientSecretResponse>("/api/realtime/client-secret", {
         contact_id: activeContactId,
         agent_profile_id: activeAgentProfileId,
+        provider_profile_id: activeRealtimeProfileId,
+        telephony_profile_id: activeTelephonyProfileId,
       });
       startTransition(() => {
         setClientSecretResult(payload);
@@ -325,7 +471,7 @@ function App() {
         setSessionView(nextSession);
         setSelectedSessionId(nextSession.session.session_id);
       });
-      await refreshSessions();
+      await Promise.all([refreshSessions(), refreshToolHistory()]);
     } catch (fetchError) {
       setError(fetchError instanceof Error ? fetchError.message : "Unable to run next turn.");
     } finally {
@@ -333,11 +479,106 @@ function App() {
     }
   }
 
+  async function activateProvider(surface: ProviderSurface, profileId: string): Promise<void> {
+    setLoading(true);
+    setError(null);
+    try {
+      await apiPost<ProviderProfile>(`/api/runtime/providers/${surface}/select`, { profile_id: profileId });
+      await Promise.all([refreshRuntimeConfig(), refreshDashboard()]);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Unable to activate provider profile.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveProvider(): Promise<void> {
+    setLoading(true);
+    setError(null);
+    try {
+      await apiPost<ProviderProfile>("/api/runtime/providers", {
+        name: providerForm.name,
+        provider: providerForm.provider,
+        surface: providerForm.surface,
+        api_key: providerForm.api_key || null,
+        account_sid: providerForm.account_sid || null,
+        auth_token: providerForm.auth_token || null,
+        from_number: providerForm.from_number || null,
+        model: providerForm.model || null,
+        endpoint: providerForm.endpoint || null,
+        notes: providerForm.notes,
+        metadata: {},
+      });
+      startTransition(() => {
+        setProviderForm(defaultProviderForm);
+      });
+      await refreshRuntimeConfig();
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Unable to save provider profile.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function saveTool(): Promise<void> {
+    setLoading(true);
+    setError(null);
+    try {
+      await apiPost<ToolIntegration>("/api/tools", {
+        name: toolForm.name,
+        kind: toolForm.kind,
+        description: toolForm.description,
+        enabled: true,
+        endpoint_url: toolForm.endpoint_url || null,
+        http_method: "POST",
+        auth_profile_id: toolForm.auth_profile_id || null,
+        mapped_functions: toolForm.mapped_functions
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean),
+        static_headers: {},
+        expected_fields: ["reason"],
+        simulator_response: toolForm.simulator_response,
+      });
+      startTransition(() => {
+        setToolForm(defaultToolForm);
+      });
+      await Promise.all([refreshRuntimeConfig(), refreshToolHistory(), refreshDashboard()]);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Unable to save tool integration.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function runToolProbe(toolId: string, functionName: string | undefined): Promise<void> {
+    setLoading(true);
+    setError(null);
+    try {
+      await apiPost<ToolExecutionRecord>(`/api/tools/${toolId}/execute`, {
+        session_id: selectedSessionId,
+        reason: "Operator diagnostic run from the Sonic Calling tool mesh.",
+        arguments: {
+          function_name: functionName,
+          reason: "Operator diagnostic run from the Sonic Calling tool mesh.",
+        },
+      });
+      await Promise.all([refreshToolHistory(), refreshSessions()]);
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Unable to run tool probe.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   const activeContact = summary?.contacts.find((contact) => contact.id === activeContactId) ?? null;
-  const activeAgentProfile =
-    summary?.agent_profiles.find((profile) => profile.id === activeAgentProfileId) ?? null;
-  const ledgerSession = sessionLedger.find((session) => session.session_id === selectedSessionId) ?? null;
-  const activeSession = sessionView?.session.session_id === selectedSessionId ? sessionView.session : ledgerSession ?? sessionView?.session ?? null;
+  const activeAgentProfile = summary?.agent_profiles.find((profile) => profile.id === activeAgentProfileId) ?? null;
+  const activeSessionFromLedger =
+    sessionLedger.find((session) => session.session_id === selectedSessionId) ?? null;
+  const activeSession =
+    sessionView?.session.session_id === selectedSessionId
+      ? sessionView.session
+      : activeSessionFromLedger ?? sessionView?.session ?? null;
   const liveTrace = sessionView?.agent_reply?.trace ?? activeSession?.trace ?? [];
   const compliance = activeSession?.compliance ?? sessionPlan?.compliance ?? null;
   const complianceReasons = compliance?.reasons.length ? compliance.reasons : summary?.compliance_rules ?? [];
@@ -346,17 +587,26 @@ function App() {
   const runtimeDisposition = sessionView?.agent_reply?.disposition ?? activeSession?.latest_disposition ?? "continue";
   const planNotes = sessionPlan?.notes ?? [];
   const runtimeHealth = summary?.runtime_health ?? null;
+  const providerProfiles = runtimeConfig?.provider_profiles ?? [];
+  const toolIntegrations = runtimeConfig?.tool_integrations ?? [];
+
+  const groupedProviders = {
+    realtime: providerProfiles.filter((profile) => profile.surface === "realtime"),
+    telephony: providerProfiles.filter((profile) => profile.surface === "telephony"),
+    tooling: providerProfiles.filter((profile) => profile.surface === "tooling"),
+    analytics: providerProfiles.filter((profile) => profile.surface === "analytics"),
+  };
 
   return (
     <div className="shell">
       <header className="hero">
         <div className="hero-copy">
-          <p className="eyebrow">Realtime telephony platform / OpenAI Realtime / Twilio Media Streams</p>
+          <p className="eyebrow">Realtime telephony platform / OpenAI Realtime / Twilio Media Streams / BYO API</p>
           <h1>Sonic Calling</h1>
           <p className="hero-body">
             Build production-grade voice agents with a VideoSDK-style developer experience: realtime session
-            templates, Twilio stream ingress, client-secret minting, runtime observability, compliance guardrails,
-            tool-aware personas, and a polished operator cockpit for testing every live turn before you deploy.
+            templates, Twilio stream ingress, masked provider vaults, live tool execution, client-secret minting,
+            runtime observability, and a hyper-detailed operator cockpit for testing every call path before you deploy.
           </p>
         </div>
 
@@ -370,7 +620,8 @@ function App() {
           <div className="api-badge">
             <span>OpenAI Realtime</span>
             <span>Twilio Voice</span>
-            <span>Twilio-ready</span>
+            <span>BYO Provider Vault</span>
+            <span>Tool Mesh</span>
           </div>
         </div>
       </header>
@@ -410,13 +661,209 @@ function App() {
                 <strong>{runtimeHealth?.twilio_credentials_configured ? "Configured" : "Missing creds"}</strong>
               </article>
               <article className="status-card">
-                <span>Input format</span>
-                <strong>{runtimeHealth?.input_audio_format ?? "g711_ulaw"}</strong>
+                <span>BYO realtime</span>
+                <strong>{runtimeHealth?.byo_realtime_ready ? "Ready" : "Not ready"}</strong>
               </article>
               <article className="status-card">
-                <span>Turn detection</span>
-                <strong>{runtimeHealth?.turn_detection_mode ?? "server_vad"}</strong>
+                <span>Tool integrations</span>
+                <strong>{runtimeHealth?.tool_integrations_enabled ?? 0}</strong>
               </article>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
+              <span>Provider vault</span>
+              <strong>{providerProfiles.length} profiles</strong>
+            </div>
+            <div className="vault-grid">
+              {(["realtime", "telephony", "tooling"] as ProviderSurface[]).map((surface) => (
+                <div key={surface} className="vault-column">
+                  <h2>{surface}</h2>
+                  <div className="trace-list">
+                    {(groupedProviders[surface] ?? []).map((profile) => (
+                      <article key={profile.profile_id} className={`trace-card provider-card ${profile.active ? "provider-card-active" : ""}`}>
+                        <div className="trace-topline">
+                          <strong>{profile.name}</strong>
+                          <span>{profile.provider}</span>
+                        </div>
+                        <p>{profile.model ?? profile.account_label ?? profile.endpoint ?? "Configured profile"}</p>
+                        <small>{profile.masked_secret ?? "No secret stored"}</small>
+                        <div className="tool-stack compact-stack">
+                          <span>{profile.auth_source}</span>
+                          <span>{profile.ready ? "ready" : "needs setup"}</span>
+                        </div>
+                        <ul className="mini-list">
+                          {profile.readiness_notes.map((note) => (
+                            <li key={note}>{note}</li>
+                          ))}
+                        </ul>
+                        <button
+                          type="button"
+                          className="secondary-action inline-action"
+                          onClick={() => void activateProvider(profile.surface, profile.profile_id)}
+                          disabled={loading || profile.active}
+                        >
+                          {profile.active ? "Active" : "Activate"}
+                        </button>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="config-form">
+              <div className="form-heading">
+                <strong>Add BYO provider</strong>
+                <span>Store masked credentials for realtime, telephony, or sidecar tooling.</span>
+              </div>
+              <div className="form-grid">
+                <label>
+                  Name
+                  <input value={providerForm.name} onChange={(event) => setProviderForm((current) => ({ ...current, name: event.target.value }))} />
+                </label>
+                <label>
+                  Provider
+                  <select value={providerForm.provider} onChange={(event) => setProviderForm((current) => ({ ...current, provider: event.target.value as ProviderName }))}>
+                    <option value="openai">OpenAI</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="twilio">Twilio</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                </label>
+                <label>
+                  Surface
+                  <select value={providerForm.surface} onChange={(event) => setProviderForm((current) => ({ ...current, surface: event.target.value as ProviderSurface }))}>
+                    <option value="realtime">Realtime</option>
+                    <option value="telephony">Telephony</option>
+                    <option value="tooling">Tooling</option>
+                    <option value="analytics">Analytics</option>
+                  </select>
+                </label>
+                <label>
+                  Model
+                  <input value={providerForm.model} onChange={(event) => setProviderForm((current) => ({ ...current, model: event.target.value }))} />
+                </label>
+                <label>
+                  Endpoint
+                  <input value={providerForm.endpoint} onChange={(event) => setProviderForm((current) => ({ ...current, endpoint: event.target.value }))} />
+                </label>
+                <label>
+                  API key
+                  <input value={providerForm.api_key} onChange={(event) => setProviderForm((current) => ({ ...current, api_key: event.target.value }))} />
+                </label>
+                <label>
+                  Account SID
+                  <input value={providerForm.account_sid} onChange={(event) => setProviderForm((current) => ({ ...current, account_sid: event.target.value }))} />
+                </label>
+                <label>
+                  Auth token
+                  <input value={providerForm.auth_token} onChange={(event) => setProviderForm((current) => ({ ...current, auth_token: event.target.value }))} />
+                </label>
+                <label>
+                  From number
+                  <input value={providerForm.from_number} onChange={(event) => setProviderForm((current) => ({ ...current, from_number: event.target.value }))} />
+                </label>
+              </div>
+              <label className="full-width">
+                Notes
+                <textarea value={providerForm.notes} onChange={(event) => setProviderForm((current) => ({ ...current, notes: event.target.value }))} />
+              </label>
+              <button type="button" className="secondary-action" onClick={() => void saveProvider()} disabled={loading || !providerForm.name}>
+                Save Provider Profile
+              </button>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
+              <span>Tool mesh</span>
+              <strong>{toolIntegrations.length} integrations</strong>
+            </div>
+            <div className="trace-list">
+              {toolIntegrations.map((tool) => (
+                <article key={tool.tool_id} className="trace-card">
+                  <div className="trace-topline">
+                    <strong>{tool.name}</strong>
+                    <span>{tool.kind}</span>
+                  </div>
+                  <p>{tool.description}</p>
+                  <small>{tool.last_result_summary || tool.simulator_response || "No executions yet."}</small>
+                  <div className="tool-stack compact-stack">
+                    {tool.mapped_functions.map((fn) => (
+                      <span key={fn}>{fn}</span>
+                    ))}
+                  </div>
+                  <div className="default-row inline-row">
+                    <span>{tool.requires_network ? tool.endpoint_url ?? "Endpoint required" : "Simulator-safe integration"}</span>
+                    <button
+                      type="button"
+                      className="secondary-action inline-action"
+                      onClick={() => void runToolProbe(tool.tool_id, tool.mapped_functions[0])}
+                      disabled={loading}
+                    >
+                      Run Probe
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div className="config-form">
+              <div className="form-heading">
+                <strong>Add tool integration</strong>
+                <span>Map agent functions to a webhook, CRM, booking engine, or handoff rail.</span>
+              </div>
+              <div className="form-grid">
+                <label>
+                  Name
+                  <input value={toolForm.name} onChange={(event) => setToolForm((current) => ({ ...current, name: event.target.value }))} />
+                </label>
+                <label>
+                  Kind
+                  <select value={toolForm.kind} onChange={(event) => setToolForm((current) => ({ ...current, kind: event.target.value as ToolKind }))}>
+                    <option value="webhook">Webhook</option>
+                    <option value="crm">CRM</option>
+                    <option value="calendar">Calendar</option>
+                    <option value="sms">SMS</option>
+                    <option value="handoff">Handoff</option>
+                    <option value="lookup">Lookup</option>
+                  </select>
+                </label>
+                <label>
+                  Auth profile
+                  <select value={toolForm.auth_profile_id} onChange={(event) => setToolForm((current) => ({ ...current, auth_profile_id: event.target.value }))}>
+                    <option value="">None</option>
+                    {providerProfiles.map((profile) => (
+                      <option key={profile.profile_id} value={profile.profile_id}>
+                        {profile.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Endpoint URL
+                  <input value={toolForm.endpoint_url} onChange={(event) => setToolForm((current) => ({ ...current, endpoint_url: event.target.value }))} />
+                </label>
+              </div>
+              <label className="full-width">
+                Description
+                <textarea value={toolForm.description} onChange={(event) => setToolForm((current) => ({ ...current, description: event.target.value }))} />
+              </label>
+              <div className="form-grid">
+                <label>
+                  Mapped functions
+                  <input value={toolForm.mapped_functions} onChange={(event) => setToolForm((current) => ({ ...current, mapped_functions: event.target.value }))} />
+                </label>
+                <label>
+                  Simulator response
+                  <input value={toolForm.simulator_response} onChange={(event) => setToolForm((current) => ({ ...current, simulator_response: event.target.value }))} />
+                </label>
+              </div>
+              <button type="button" className="secondary-action" onClick={() => void saveTool()} disabled={loading || !toolForm.name}>
+                Save Tool Integration
+              </button>
             </div>
           </section>
 
@@ -576,12 +1023,12 @@ function App() {
                 <strong>{activeSession?.runtime.bridge_mode ?? "simulated"}</strong>
               </div>
               <div className="default-row">
-                <span>Stream SID</span>
-                <strong>{activeSession?.runtime.stream_sid ?? "n/a"}</strong>
+                <span>Realtime profile</span>
+                <strong>{activeSession?.runtime.provider_profile_id ?? "n/a"}</strong>
               </div>
               <div className="default-row">
-                <span>Call SID</span>
-                <strong>{activeSession?.runtime.call_sid ?? "n/a"}</strong>
+                <span>Telephony profile</span>
+                <strong>{activeSession?.runtime.telephony_profile_id ?? "n/a"}</strong>
               </div>
               <div className="default-row">
                 <span>OpenAI response</span>
@@ -594,6 +1041,14 @@ function App() {
               <div className="default-row">
                 <span>OpenAI events</span>
                 <strong>{activeSession?.runtime.openai_event_count ?? 0}</strong>
+              </div>
+              <div className="default-row">
+                <span>Tool executions</span>
+                <strong>{activeSession?.runtime.tool_execution_count ?? 0}</strong>
+              </div>
+              <div className="default-row">
+                <span>Last tool status</span>
+                <strong>{activeSession?.runtime.last_tool_status ?? "n/a"}</strong>
               </div>
             </div>
           </section>
@@ -608,7 +1063,7 @@ function App() {
                 liveTrace.map((trace, index) => (
                   <article key={`${trace.provider}-${trace.event}-${index}`} className="trace-card">
                     <div className="trace-topline">
-                      <strong>{trace.provider === "openai" ? "OpenAI Realtime" : "Local policy engine"}</strong>
+                      <strong>{trace.provider === "openai" ? "OpenAI Realtime" : trace.provider}</strong>
                       <span>{Math.round(trace.confidence * 100)}%</span>
                     </div>
                     <p>{trace.model}</p>
@@ -626,6 +1081,50 @@ function App() {
                   <small>Waiting for the first caller utterance to create a live model trace.</small>
                 </article>
               )}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
+              <span>Session tool output</span>
+              <strong>{activeSession?.tool_executions.length ?? 0} executions</strong>
+            </div>
+            <div className="event-list">
+              {(activeSession?.tool_executions ?? []).length ? (
+                activeSession?.tool_executions.map((execution) => (
+                  <article key={execution.execution_id} className="event-card">
+                    <div className="trace-topline">
+                      <strong>{execution.tool_name}</strong>
+                      <span>{execution.status}</span>
+                    </div>
+                    <p>{String(execution.output_payload.summary ?? execution.reason)}</p>
+                    <small>{formatTimestamp(execution.timestamp)}</small>
+                  </article>
+                ))
+              ) : (
+                <div className="trace-card">
+                  <p>No tool executions recorded on this session yet.</p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
+              <span>Global tool history</span>
+              <strong>{toolHistory.length} recent</strong>
+            </div>
+            <div className="event-list">
+              {toolHistory.map((execution) => (
+                <article key={execution.execution_id} className="event-card">
+                  <div className="trace-topline">
+                    <strong>{execution.tool_name}</strong>
+                    <span>{execution.status}</span>
+                  </div>
+                  <p>{String(execution.output_payload.summary ?? execution.reason)}</p>
+                  <small>{execution.session_id ?? "no session"} / {formatTimestamp(execution.timestamp)}</small>
+                </article>
+              ))}
             </div>
           </section>
 

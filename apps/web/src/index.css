@@ -48,7 +48,9 @@ body::before {
 }
 
 button,
-textarea {
+textarea,
+input,
+select {
   font: inherit;
 }
 
@@ -418,6 +420,17 @@ textarea {
   outline: none;
 }
 
+input,
+select {
+  width: 100%;
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: #07131f;
+  color: var(--text);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+
 .hint-box,
 .runtime-card,
 .trace-card,
@@ -467,9 +480,85 @@ textarea {
 .surface-list,
 .defaults-list,
 .event-list,
-.ledger-list {
+.ledger-list,
+.vault-grid {
   display: grid;
   gap: 12px;
+}
+
+.vault-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.vault-column {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.provider-card {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.provider-card-active {
+  border-color: rgba(103, 229, 255, 0.32);
+  background: linear-gradient(135deg, rgba(103, 229, 255, 0.11), rgba(255, 190, 92, 0.08));
+}
+
+.compact-stack {
+  margin: 12px 0;
+}
+
+.mini-list {
+  margin: 0 0 14px;
+  padding-left: 18px;
+  color: var(--soft);
+  display: grid;
+  gap: 6px;
+}
+
+.config-form {
+  margin-top: 16px;
+  border-radius: 22px;
+  padding: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: grid;
+  gap: 14px;
+}
+
+.form-heading {
+  display: grid;
+  gap: 6px;
+}
+
+.form-heading span {
+  color: var(--soft);
+  line-height: 1.6;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.form-grid label,
+.full-width {
+  display: grid;
+  gap: 8px;
+  color: var(--soft);
+  font-size: 0.92rem;
+}
+
+.inline-action {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.inline-row {
+  margin-top: 12px;
 }
 
 .secret-card p,
@@ -594,7 +683,9 @@ textarea {
   .contact-grid,
   .agent-grid,
   .status-grid,
-  .telemetry-grid {
+  .telemetry-grid,
+  .vault-grid,
+  .form-grid {
     grid-template-columns: 1fr;
   }
 

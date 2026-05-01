@@ -24,8 +24,11 @@ class SessionStore:
         agent_profile: AgentProfile,
         compliance: ComplianceResult,
         websocket_path: str,
+        provider_profile_id: str | None = None,
+        telephony_profile_id: str | None = None,
+        live_bridge_enabled: bool | None = None,
     ) -> RealtimeSession:
-        bridge_mode = "openai_realtime" if settings.openai_api_key else "simulated"
+        bridge_mode = "openai_realtime" if live_bridge_enabled else "simulated"
         session = RealtimeSession(
             session_id=f"session-{uuid.uuid4().hex[:10]}",
             contact=contact,
@@ -40,10 +43,14 @@ class SessionStore:
                 bridge_status="idle",
                 input_audio_format=settings.openai_input_audio_format,
                 output_audio_format=settings.openai_output_audio_format,
+                provider_profile_id=provider_profile_id,
+                telephony_profile_id=telephony_profile_id,
             ),
             compliance=compliance,
             latest_reply="",
             websocket_path=websocket_path,
+            provider_profile_id=provider_profile_id,
+            telephony_profile_id=telephony_profile_id,
         )
         self._sessions[session.session_id] = session
         return session

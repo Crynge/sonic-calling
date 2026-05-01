@@ -7,17 +7,24 @@ from typing import Any
 from fastapi import WebSocket
 
 from ..config import settings
-from ..schemas import ConversationTurn, RealtimeSession, RuntimeHealth, StreamEvent
+from ..schemas import ConversationTurn, ProviderSurface, RealtimeSession, RuntimeHealth, StreamEvent
 from .openai_transport import OpenAIRealtimeTransport
+from .runtime_config import RuntimeConfigStore
+from .tool_registry import ToolRegistry
 
 
 class TwilioRealtimeBridge:
-    def __init__(self) -> None:
+    def __init__(self, runtime_config: RuntimeConfigStore | None = None, tools: ToolRegistry | None = None) -> None:
+        self.runtime_config = runtime_config or RuntimeConfigStore()
+        self.tools = tools or ToolRegistry(self.runtime_config)
         self.transport = OpenAIRealtimeTransport()
+
+    def resolve_realtime_credentials(self, profile_id: str | None = None) -> dict[str, Any]:
+        return self.runtime_config.resolve_credentials(ProviderSurface.REALTIME, profile_id)
 
     @property
     def live_bridge_enabled(self) -> bool:
-        return self.transport.enabled
+        return self.transport.enabled_for(self.resolve_realtime_credentials())
 
     def build_stream_url(self, session_id: str) -> str:
         base = settings.public_websocket_base.rstrip("/")
@@ -28,20 +35,28 @@ class TwilioRealtimeBridge:
         return f"{base}/twilio/media-stream/{session_id}"
 
     def build_runtime_health(self) -> RuntimeHealth:
+        realtime_profile = self.runtime_config.resolve_provider_profile(ProviderSurface.REALTIME)
+        telephony_profile = self.runtime_config.resolve_provider_profile(ProviderSurface.TELEPHONY)
+        realtime_credentials = self.resolve_realtime_credentials()
         return RuntimeHealth(
-            openai_api_configured=bool(settings.openai_api_key),
+            openai_api_configured=bool(self.transport.resolve_api_key(realtime_credentials)),
             twilio_credentials_configured=bool(
-                settings.twilio_account_sid and settings.twilio_auth_token and settings.twilio_from_number
+                telephony_profile
+                and telephony_profile.ready
             ),
-            live_bridge_enabled=self.live_bridge_enabled,
-            client_secret_enabled=bool(settings.openai_api_key),
+            live_bridge_enabled=self.transport.enabled_for(realtime_credentials),
+            client_secret_enabled=self.transport.enabled_for(realtime_credentials),
             public_base_url=settings.public_base_url,
             public_websocket_base=settings.public_websocket_base,
-            openai_websocket_url=self.transport.build_websocket_url(),
+            openai_websocket_url=self.transport.build_websocket_url(realtime_credentials),
             input_audio_format=settings.openai_input_audio_format,
             output_audio_format=settings.openai_output_audio_format,
             transcription_model=settings.openai_transcription_model,
             turn_detection_mode=settings.openai_turn_detection_mode,
+            active_realtime_profile=realtime_profile.name if realtime_profile else None,
+            active_telephony_profile=telephony_profile.name if telephony_profile else None,
+            tool_integrations_enabled=sum(1 for item in self.tools.list_integrations() if item.enabled),
+            byo_realtime_ready=bool(realtime_profile and realtime_profile.ready),
         )
 
     def normalize_twilio_message(self, raw_message: str) -> dict[str, Any]:
@@ -64,9 +79,10 @@ class TwilioRealtimeBridge:
         }
 
     def build_openai_runtime_notes(self) -> dict[str, str]:
+        profile = self.runtime_config.resolve_provider_profile(ProviderSurface.REALTIME)
         return {
             "provider": "openai",
-            "model": settings.openai_realtime_model,
+            "model": profile.model if profile and profile.model else settings.openai_realtime_model,
             "voice": settings.openai_voice,
             "bridge_mode": "twilio-media-stream-to-openai-realtime",
         }
@@ -256,6 +272,7 @@ class TwilioRealtimeBridge:
                 "Function call arguments completed.",
                 {
                     "name": payload.get("name"),
+                    "call_id": payload.get("call_id"),
                     "arguments": payload.get("arguments", "")[:200],
                 },
             )
@@ -277,7 +294,12 @@ class TwilioRealtimeBridge:
         self.append_event(session, "openai", event_type, "OpenAI realtime event observed.", self.preview_payload(payload))
 
     async def run_simulated_capture(self, websocket: WebSocket, session: RealtimeSession) -> None:
-        self.append_event(session, "system", "bridge.simulated", "Running in simulator-only mode because OPENAI_API_KEY is absent.")
+        self.append_event(
+            session,
+            "system",
+            "bridge.simulated",
+            "Running in simulator-only mode because no ready BYO Realtime profile is active.",
+        )
         try:
             while True:
                 message = await websocket.receive_text()
@@ -300,7 +322,8 @@ class TwilioRealtimeBridge:
         session.runtime.bridge_status = "connecting"
         self.append_event(session, "system", "bridge.connecting", "Connecting Twilio media stream to OpenAI Realtime.")
 
-        openai_socket = await self.transport.open_websocket()
+        realtime_credentials = self.resolve_realtime_credentials(session.provider_profile_id)
+        openai_socket = await self.transport.open_websocket(realtime_credentials)
         try:
             await openai_socket.send(json.dumps(session_template))
             self.append_event(session, "system", "session.update.sent", "Sent session bootstrap to OpenAI Realtime.")
@@ -337,11 +360,50 @@ class TwilioRealtimeBridge:
             if normalized["event"] == "stop":
                 break
 
+    async def _handle_realtime_tool_call(self, openai_socket, session: RealtimeSession, payload: dict[str, Any]) -> None:
+        tool_name = payload.get("name") or "unknown_tool"
+        raw_arguments = payload.get("arguments", "{}")
+        try:
+            arguments = json.loads(raw_arguments) if raw_arguments else {}
+        except json.JSONDecodeError:
+            arguments = {"raw_arguments": raw_arguments}
+        reason = arguments.get("reason") or f"Realtime tool call for {tool_name}"
+        record = await self.tools.execute_async(tool_name, reason, arguments, session)
+        self.append_event(
+            session,
+            "tool",
+            "tool.execution",
+            f"Executed {tool_name} with status {record.status.value}.",
+            {
+                "tool_name": tool_name,
+                "status": record.status.value,
+                "call_id": payload.get("call_id"),
+            },
+        )
+        if payload.get("call_id"):
+            await openai_socket.send(
+                json.dumps(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "function_call_output",
+                            "call_id": payload["call_id"],
+                            "output": json.dumps(record.output_payload),
+                        },
+                    }
+                )
+            )
+            await openai_socket.send(json.dumps({"type": "response.create"}))
+
     async def _forward_openai_to_twilio(self, twilio_websocket: WebSocket, openai_socket, session: RealtimeSession) -> None:
         async for raw_message in openai_socket:
             payload = json.loads(raw_message)
             self.apply_openai_event(session, payload)
             event_type = payload.get("type")
+
+            if event_type == "response.function_call_arguments.done":
+                await self._handle_realtime_tool_call(openai_socket, session, payload)
+                continue
 
             if event_type == "response.output_audio.delta" and session.runtime.stream_sid:
                 delta = payload.get("delta")

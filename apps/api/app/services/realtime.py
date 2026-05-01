@@ -9,6 +9,7 @@ from ..schemas import (
     RealtimeSession,
     RealtimeTrace,
     SessionState,
+    ToolIntegration,
 )
 from .compliance import evaluate_compliance
 
@@ -43,15 +44,28 @@ class RealtimeOrchestrator:
             "threshold": settings.openai_vad_threshold,
         }
 
-    def build_session_template(self, contact: ContactProfile, agent_profile: AgentProfile) -> dict[str, object]:
+    def build_session_template(
+        self,
+        contact: ContactProfile,
+        agent_profile: AgentProfile,
+        model: str | None = None,
+        tool_catalog: list[ToolIntegration] | None = None,
+    ) -> dict[str, object]:
+        tool_catalog = tool_catalog or []
+        tool_lookup = {
+            function_name: integration
+            for integration in tool_catalog
+            for function_name in integration.mapped_functions
+        }
         session: dict[str, object] = {
             "type": "realtime",
-            "model": settings.openai_realtime_model,
+            "model": model or settings.openai_realtime_model,
             "instructions": (
                 f"You are {agent_profile.name}, a realtime phone agent for {contact.organization}. "
                 f"Goal: {agent_profile.goal} "
                 "Always identify yourself as an AI voice assistant, remain concise, verify intent, "
-                "avoid unsupported promises, and call tools instead of pretending work is complete."
+                "avoid unsupported promises, and call tools instead of pretending work is complete. "
+                "If a tool is available for booking, CRM updates, messaging, or escalation, prefer using it."
             ),
             "output_modalities": ["audio"],
             "audio": {
@@ -75,12 +89,17 @@ class RealtimeOrchestrator:
                 {
                     "type": "function",
                     "name": tool_name,
-                    "description": f"Invoke the {tool_name} business workflow.",
+                    "description": (
+                        tool_lookup[tool_name].description
+                        if tool_name in tool_lookup
+                        else f"Invoke the {tool_name} business workflow."
+                    ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "reason": {"type": "string"},
                             "contact_id": {"type": "string"},
+                            "time_window": {"type": "string"},
                         },
                         "required": ["reason"],
                         "additionalProperties": False,

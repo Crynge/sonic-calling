@@ -13,7 +13,17 @@ def utc_now() -> str:
 
 class ProviderName(str, Enum):
     OPENAI = "openai"
+    GEMINI = "gemini"
+    TWILIO = "twilio"
+    CUSTOM = "custom"
     LOCAL = "local"
+
+
+class ProviderSurface(str, Enum):
+    REALTIME = "realtime"
+    TELEPHONY = "telephony"
+    TOOLING = "tooling"
+    ANALYTICS = "analytics"
 
 
 class SessionState(str, Enum):
@@ -23,6 +33,22 @@ class SessionState(str, Enum):
     HANDOFF = "handoff"
     COMPLETED = "completed"
     BLOCKED = "blocked"
+
+
+class ToolKind(str, Enum):
+    CRM = "crm"
+    CALENDAR = "calendar"
+    SMS = "sms"
+    WEBHOOK = "webhook"
+    HANDOFF = "handoff"
+    LOOKUP = "lookup"
+
+
+class ToolExecutionStatus(str, Enum):
+    SIMULATED = "simulated"
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+    ERROR = "error"
 
 
 class ContactProfile(BaseModel):
@@ -72,11 +98,23 @@ class RealtimeTrace(BaseModel):
 
 
 class StreamEvent(BaseModel):
-    source: Literal["twilio", "openai", "system"]
+    source: Literal["twilio", "openai", "system", "tool"]
     event: str
     detail: str
     timestamp: str = Field(default_factory=utc_now)
     payload_preview: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecutionRecord(BaseModel):
+    execution_id: str
+    tool_id: str
+    tool_name: str
+    status: ToolExecutionStatus
+    reason: str
+    session_id: str | None = None
+    timestamp: str = Field(default_factory=utc_now)
+    input_payload: dict[str, Any] = Field(default_factory=dict)
+    output_payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionRuntime(BaseModel):
@@ -94,6 +132,11 @@ class SessionRuntime(BaseModel):
     last_output_transcript: str = ""
     last_tool_name: str | None = None
     last_tool_arguments: str | None = None
+    last_tool_status: ToolExecutionStatus | None = None
+    last_tool_result: str | None = None
+    tool_execution_count: int = 0
+    provider_profile_id: str | None = None
+    telephony_profile_id: str | None = None
     last_error: str | None = None
 
 
@@ -116,17 +159,22 @@ class RealtimeSession(BaseModel):
     turns: list[ConversationTurn] = Field(default_factory=list)
     trace: list[RealtimeTrace] = Field(default_factory=list)
     events: list[StreamEvent] = Field(default_factory=list)
+    tool_executions: list[ToolExecutionRecord] = Field(default_factory=list)
     runtime: SessionRuntime = Field(default_factory=SessionRuntime)
     compliance: ComplianceResult
     latest_reply: str = ""
     latest_disposition: str = "continue"
     summary_note: str = ""
     websocket_path: str = ""
+    provider_profile_id: str | None = None
+    telephony_profile_id: str | None = None
 
 
 class StartSessionRequest(BaseModel):
     contact_id: str
     agent_profile_id: str = "agent-sales"
+    provider_profile_id: str | None = None
+    telephony_profile_id: str | None = None
 
 
 class RespondRequest(BaseModel):
@@ -148,6 +196,85 @@ class DashboardMetric(BaseModel):
     tone: Literal["primary", "neutral", "warning"]
 
 
+class ProviderProfile(BaseModel):
+    profile_id: str
+    name: str
+    provider: ProviderName
+    surface: ProviderSurface
+    active: bool = False
+    ready: bool = False
+    auth_source: Literal["environment", "vault", "unset"] = "unset"
+    masked_secret: str | None = None
+    account_label: str | None = None
+    model: str | None = None
+    endpoint: str | None = None
+    notes: str = ""
+    readiness_notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class ProviderProfileInput(BaseModel):
+    name: str
+    provider: ProviderName
+    surface: ProviderSurface
+    api_key: str | None = None
+    account_sid: str | None = None
+    auth_token: str | None = None
+    from_number: str | None = None
+    model: str | None = None
+    endpoint: str | None = None
+    notes: str = ""
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class ProviderSelectionRequest(BaseModel):
+    profile_id: str
+
+
+class ToolIntegration(BaseModel):
+    tool_id: str
+    name: str
+    kind: ToolKind
+    description: str
+    enabled: bool = True
+    requires_network: bool = False
+    mapped_functions: list[str] = Field(default_factory=list)
+    endpoint_url: str | None = None
+    http_method: Literal["GET", "POST"] = "POST"
+    auth_profile_id: str | None = None
+    static_headers: dict[str, str] = Field(default_factory=dict)
+    expected_fields: list[str] = Field(default_factory=list)
+    simulator_response: str = ""
+    last_result_summary: str = ""
+
+
+class ToolIntegrationInput(BaseModel):
+    name: str
+    kind: ToolKind
+    description: str
+    enabled: bool = True
+    endpoint_url: str | None = None
+    http_method: Literal["GET", "POST"] = "POST"
+    auth_profile_id: str | None = None
+    mapped_functions: list[str] = Field(default_factory=list)
+    static_headers: dict[str, str] = Field(default_factory=dict)
+    expected_fields: list[str] = Field(default_factory=list)
+    simulator_response: str = ""
+
+
+class ToolExecutionRequest(BaseModel):
+    session_id: str | None = None
+    reason: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeConfigurationView(BaseModel):
+    provider_profiles: list[ProviderProfile]
+    tool_integrations: list[ToolIntegration]
+    active_realtime_profile_id: str | None = None
+    active_telephony_profile_id: str | None = None
+
+
 class RuntimeHealth(BaseModel):
     openai_api_configured: bool
     twilio_credentials_configured: bool
@@ -160,6 +287,10 @@ class RuntimeHealth(BaseModel):
     output_audio_format: str
     transcription_model: str
     turn_detection_mode: str
+    active_realtime_profile: str | None = None
+    active_telephony_profile: str | None = None
+    tool_integrations_enabled: int = 0
+    byo_realtime_ready: bool = False
 
 
 class DashboardSummary(BaseModel):
