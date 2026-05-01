@@ -19,56 +19,81 @@ class RealtimeOrchestrator:
 
     def build_opening_line(self, contact: ContactProfile, agent_profile: AgentProfile) -> str:
         return (
-            f"Hi {contact.full_name.split()[0]}, this is the {agent_profile.name} recorded voice assistant for "
-            f"{contact.organization}. I'm calling about {contact.use_case}. Is now an okay time for a quick update?"
+            f"{settings.disclosure_line} "
+            f"I'm the {agent_profile.name} voice assistant for {contact.organization}, "
+            f"calling about {contact.use_case}. Is now an okay time for a quick update?"
         )
 
-    def build_session_template(self, contact: ContactProfile, agent_profile: AgentProfile) -> dict[str, object]:
+    def build_turn_detection(self) -> dict[str, object]:
+        if settings.openai_turn_detection_mode == "semantic_vad":
+            return {
+                "type": "semantic_vad",
+                "create_response": settings.openai_turn_create_response,
+                "interrupt_response": settings.openai_turn_interrupt_response,
+                "eagerness": settings.openai_semantic_eagerness,
+            }
+
         return {
-            "type": "session.update",
-            "session": {
-                "model": settings.openai_realtime_model,
-                "instructions": (
-                    f"You are {agent_profile.name}, a realtime phone agent for {contact.organization}. "
-                    f"Goal: {agent_profile.goal} "
-                    "Keep turns short, confirm understanding, and call tools instead of hallucinating actions."
-                ),
-                "output_modalities": ["audio"],
-                "audio": {
-                    "input": {
-                        "format": {
-                            "type": "audio/pcm",
-                            "rate": settings.openai_input_sample_rate,
-                        },
-                        "turn_detection": {
-                            "type": "semantic_vad",
-                        },
-                    },
-                    "output": {
-                        "format": {
-                            "type": "audio/pcm",
-                        },
-                        "voice": agent_profile.voice,
-                    },
-                },
-                "tools": [
-                    {
-                        "type": "function",
-                        "name": tool_name,
-                        "description": f"Invoke the {tool_name} business workflow.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "reason": {"type": "string"},
-                            },
-                            "required": ["reason"],
-                            "additionalProperties": False,
-                        },
-                    }
-                    for tool_name in agent_profile.tool_stack
-                ],
-            },
+            "type": "server_vad",
+            "create_response": settings.openai_turn_create_response,
+            "interrupt_response": settings.openai_turn_interrupt_response,
+            "idle_timeout_ms": settings.openai_idle_timeout_ms,
+            "prefix_padding_ms": settings.openai_vad_prefix_padding_ms,
+            "silence_duration_ms": settings.openai_vad_silence_duration_ms,
+            "threshold": settings.openai_vad_threshold,
         }
+
+    def build_session_template(self, contact: ContactProfile, agent_profile: AgentProfile) -> dict[str, object]:
+        session: dict[str, object] = {
+            "type": "realtime",
+            "model": settings.openai_realtime_model,
+            "instructions": (
+                f"You are {agent_profile.name}, a realtime phone agent for {contact.organization}. "
+                f"Goal: {agent_profile.goal} "
+                "Always identify yourself as an AI voice assistant, remain concise, verify intent, "
+                "avoid unsupported promises, and call tools instead of pretending work is complete."
+            ),
+            "output_modalities": ["audio"],
+            "audio": {
+                "input": {
+                    "format": settings.openai_input_audio_format,
+                    "noise_reduction": {"type": settings.openai_input_noise_reduction},
+                    "transcription": {
+                        "model": settings.openai_transcription_model,
+                        "language": settings.openai_transcription_language,
+                    },
+                    "turn_detection": self.build_turn_detection(),
+                },
+                "output": {
+                    "format": settings.openai_output_audio_format,
+                    "voice": agent_profile.voice or settings.openai_voice,
+                    "speed": settings.openai_output_speed,
+                },
+            },
+            "max_output_tokens": settings.openai_max_output_tokens,
+            "tools": [
+                {
+                    "type": "function",
+                    "name": tool_name,
+                    "description": f"Invoke the {tool_name} business workflow.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "reason": {"type": "string"},
+                            "contact_id": {"type": "string"},
+                        },
+                        "required": ["reason"],
+                        "additionalProperties": False,
+                    },
+                }
+                for tool_name in agent_profile.tool_stack
+            ],
+            "tool_choice": "auto",
+        }
+        if settings.openai_tracing_mode and settings.openai_tracing_mode != "off":
+            session["tracing"] = settings.openai_tracing_mode
+
+        return {"type": "session.update", "session": session}
 
     def next_turn(self, session: RealtimeSession, caller_text: str) -> AgentReply:
         transcript = [turn.model_dump() for turn in session.turns]
@@ -98,22 +123,46 @@ class RealtimeOrchestrator:
         first_name = session.contact.full_name.split()[0]
 
         if any(token in normalized for token in ["schedule", "book", "callback", "tomorrow", "later"]):
+            suggested_tool = (
+                "reschedule_appointment"
+                if "reschedule_appointment" in session.agent_profile.tool_stack
+                else "book_callback"
+            )
             return AgentReply(
                 reply=(
-                    f"Absolutely. I can queue a callback or booking flow for {first_name}. "
+                    f"Absolutely. I can queue the next step for {first_name}. "
                     "What time window should I hold for you?"
                 ),
                 next_state=SessionState.FOLLOW_UP,
                 disposition="schedule",
-                confidence=0.88,
-                tool_suggestion="book_callback",
+                confidence=0.9,
+                tool_suggestion=suggested_tool,
                 trace=[
                     RealtimeTrace(
                         provider=ProviderName.OPENAI,
                         model=settings.openai_realtime_model,
                         event="response.create",
-                        confidence=0.88,
-                        detail="Realtime agent detected explicit scheduling intent.",
+                        confidence=0.9,
+                        detail="Realtime agent detected explicit scheduling or rescheduling intent.",
+                        used_fallback=not bool(settings.openai_api_key),
+                    )
+                ],
+            )
+
+        if any(token in normalized for token in ["cancel", "remove appointment", "skip it"]):
+            return AgentReply(
+                reply="I can note the cancellation request and send a short confirmation summary to the team.",
+                next_state=SessionState.COMPLETED,
+                disposition="continue",
+                confidence=0.84,
+                tool_suggestion="send_sms_summary",
+                trace=[
+                    RealtimeTrace(
+                        provider=ProviderName.OPENAI,
+                        model=settings.openai_realtime_model,
+                        event="response.create",
+                        confidence=0.84,
+                        detail="Realtime agent identified cancellation-style intent.",
                         used_fallback=not bool(settings.openai_api_key),
                     )
                 ],
@@ -138,10 +187,33 @@ class RealtimeOrchestrator:
                 ],
             )
 
+        if any(token in normalized for token in ["price", "cost", "quote", "roi"]):
+            return AgentReply(
+                reply=(
+                    "I can give a concise overview first and then line up a human follow-up for exact pricing. "
+                    "Is a quick summary or a booked callback better for you?"
+                ),
+                next_state=SessionState.LIVE,
+                disposition="continue",
+                confidence=0.81,
+                tool_suggestion="lookup_contact",
+                trace=[
+                    RealtimeTrace(
+                        provider=ProviderName.OPENAI,
+                        model=settings.openai_realtime_model,
+                        event="response.create",
+                        confidence=0.81,
+                        detail="Realtime assistant detected pricing sensitivity and shifted to summary-plus-follow-up mode.",
+                        used_fallback=not bool(settings.openai_api_key),
+                    )
+                ],
+            )
+
         if any(token in normalized for token in ["yes", "okay", "sure", "go ahead", "interested"]):
             return AgentReply(
                 reply=(
-                    f"Great. For {session.contact.use_case}, is your priority speed, cost, or a better long-term experience?"
+                    f"Great. For {session.contact.use_case}, is your priority speed, cost, "
+                    "or a better long-term experience?"
                 ),
                 next_state=SessionState.LIVE,
                 disposition="continue",

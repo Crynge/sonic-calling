@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 import uuid
-from ..schemas import AgentProfile, ComplianceResult, ContactProfile, RealtimeSession, SessionState
+
+from ..config import settings
+from ..schemas import (
+    AgentProfile,
+    ComplianceResult,
+    ContactProfile,
+    RealtimeSession,
+    SessionRuntime,
+    SessionState,
+    StreamEvent,
+)
 
 
 class SessionStore:
@@ -15,6 +25,7 @@ class SessionStore:
         compliance: ComplianceResult,
         websocket_path: str,
     ) -> RealtimeSession:
+        bridge_mode = "openai_realtime" if settings.openai_api_key else "simulated"
         session = RealtimeSession(
             session_id=f"session-{uuid.uuid4().hex[:10]}",
             contact=contact,
@@ -23,6 +34,13 @@ class SessionStore:
             started=False,
             turns=[],
             trace=[],
+            events=[],
+            runtime=SessionRuntime(
+                bridge_mode=bridge_mode,
+                bridge_status="idle",
+                input_audio_format=settings.openai_input_audio_format,
+                output_audio_format=settings.openai_output_audio_format,
+            ),
             compliance=compliance,
             latest_reply="",
             websocket_path=websocket_path,
@@ -30,9 +48,19 @@ class SessionStore:
         self._sessions[session.session_id] = session
         return session
 
+    def list(self) -> list[RealtimeSession]:
+        return sorted(self._sessions.values(), key=lambda item: item.created_at, reverse=True)
+
     def get(self, session_id: str) -> RealtimeSession:
         return self._sessions[session_id]
 
     def save(self, session: RealtimeSession) -> RealtimeSession:
         self._sessions[session.session_id] = session
+        return session
+
+    def append_event(self, session: RealtimeSession, event: StreamEvent) -> RealtimeSession:
+        session.events.append(event)
+        if len(session.events) > 80:
+            session.events = session.events[-80:]
+        self.save(session)
         return session

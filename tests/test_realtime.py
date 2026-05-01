@@ -43,3 +43,11 @@ def test_realtime_handoff_path() -> None:
     reply = orchestrator.next_turn(session, "I want to speak to a human representative.")
     assert reply.disposition == "handoff"
     assert reply.next_state == SessionState.HANDOFF
+
+
+def test_session_template_uses_twilio_friendly_audio_format() -> None:
+    orchestrator = RealtimeOrchestrator()
+    template = orchestrator.build_session_template(get_contact("contact-001"), get_agent_profile("agent-sales"))
+    assert template["session"]["audio"]["input"]["format"] == "g711_ulaw"
+    assert template["session"]["audio"]["output"]["format"] == "g711_ulaw"
+    assert template["session"]["tool_choice"] == "auto"

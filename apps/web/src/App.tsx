@@ -38,6 +38,20 @@ type PlatformSurface = {
   purpose: string;
 };
 
+type RuntimeHealth = {
+  openai_api_configured: boolean;
+  twilio_credentials_configured: boolean;
+  live_bridge_enabled: boolean;
+  client_secret_enabled: boolean;
+  public_base_url: string;
+  public_websocket_base: string;
+  openai_websocket_url: string;
+  input_audio_format: string;
+  output_audio_format: string;
+  transcription_model: string;
+  turn_detection_mode: string;
+};
+
 type DashboardSummary = {
   repo_name: string;
   narrative: string;
@@ -47,6 +61,7 @@ type DashboardSummary = {
   provider_defaults: Record<string, string>;
   compliance_rules: string[];
   platform_surfaces: PlatformSurface[];
+  runtime_health: RuntimeHealth;
 };
 
 type ComplianceResult = {
@@ -65,6 +80,32 @@ type RealtimeTrace = {
   used_fallback: boolean;
 };
 
+type StreamEvent = {
+  source: "twilio" | "openai" | "system";
+  event: string;
+  detail: string;
+  timestamp: string;
+  payload_preview: Record<string, unknown>;
+};
+
+type SessionRuntime = {
+  bridge_mode: "simulated" | "openai_realtime";
+  bridge_status: "idle" | "connecting" | "streaming" | "closed" | "error";
+  input_audio_format: string;
+  output_audio_format: string;
+  stream_sid: string | null;
+  call_sid: string | null;
+  openai_response_id: string | null;
+  twilio_event_count: number;
+  openai_event_count: number;
+  latest_mark: string | null;
+  last_input_transcript: string;
+  last_output_transcript: string;
+  last_tool_name: string | null;
+  last_tool_arguments: string | null;
+  last_error: string | null;
+};
+
 type ConversationTurn = {
   speaker: "agent" | "caller" | "system";
   text: string;
@@ -75,6 +116,7 @@ type SessionPayload = {
   contact: ContactProfile;
   agent_profile: AgentProfile;
   state: "ready" | "live" | "follow_up" | "handoff" | "completed" | "blocked";
+  created_at: string;
   turns: ConversationTurn[];
   compliance: ComplianceResult;
   latest_reply: string;
@@ -82,6 +124,8 @@ type SessionPayload = {
   summary_note: string;
   trace: RealtimeTrace[];
   websocket_path: string;
+  runtime: SessionRuntime;
+  events: StreamEvent[];
 };
 
 type AgentReply = {
@@ -98,6 +142,10 @@ type SessionView = {
   agent_reply: AgentReply | null;
 };
 
+type SessionCollectionView = {
+  sessions: SessionPayload[];
+};
+
 type SessionPlan = {
   contact: ContactProfile;
   agent_profile: AgentProfile;
@@ -107,6 +155,17 @@ type SessionPlan = {
   websocket_path: string;
   compliance: ComplianceResult;
   notes: string[];
+};
+
+type ClientSecretResponse = {
+  enabled: boolean;
+  session_id: string;
+  session: Record<string, unknown>;
+  client_secret: {
+    value: string;
+    expires_at: number;
+  } | null;
+  preview_reason: string | null;
 };
 
 async function apiGet<T>(path: string): Promise<T> {
@@ -133,30 +192,51 @@ function formatRiskLabel(risk: ComplianceResult["risk_level"]): string {
   return risk.replace("_", " ");
 }
 
+function formatTimestamp(value: string | null | undefined): string {
+  if (!value) {
+    return "n/a";
+  }
+  return new Date(value).toLocaleString();
+}
+
 function App() {
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+  const [sessionLedger, setSessionLedger] = useState<SessionPayload[]>([]);
   const [activeContactId, setActiveContactId] = useState("contact-001");
   const [activeAgentProfileId, setActiveAgentProfileId] = useState("agent-sales");
   const [sessionPlan, setSessionPlan] = useState<SessionPlan | null>(null);
   const [sessionView, setSessionView] = useState<SessionView | null>(null);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [clientSecretResult, setClientSecretResult] = useState<ClientSecretResponse | null>(null);
   const [composer, setComposer] = useState("Please schedule me for tomorrow afternoon.");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const deferredComposer = useDeferredValue(composer);
 
+  async function refreshDashboard(): Promise<void> {
+    const dashboard = await apiGet<DashboardSummary>("/api/dashboard/summary");
+    startTransition(() => {
+      setSummary(dashboard);
+      if (dashboard.contacts[0]) {
+        setActiveContactId((current) => current || dashboard.contacts[0].id);
+      }
+      if (dashboard.agent_profiles[0]) {
+        setActiveAgentProfileId((current) => current || dashboard.agent_profiles[0].id);
+      }
+    });
+  }
+
+  async function refreshSessions(): Promise<void> {
+    const payload = await apiGet<SessionCollectionView>("/api/sessions");
+    startTransition(() => {
+      setSessionLedger(payload.sessions);
+    });
+  }
+
   useEffect(() => {
     void (async () => {
       try {
-        const dashboard = await apiGet<DashboardSummary>("/api/dashboard/summary");
-        startTransition(() => {
-          setSummary(dashboard);
-          if (dashboard.contacts[0]) {
-            setActiveContactId((current) => current || dashboard.contacts[0].id);
-          }
-          if (dashboard.agent_profiles[0]) {
-            setActiveAgentProfileId((current) => current || dashboard.agent_profiles[0].id);
-          }
-        });
+        await Promise.all([refreshDashboard(), refreshSessions()]);
       } catch (fetchError) {
         setError(fetchError instanceof Error ? fetchError.message : "Unable to load dashboard.");
       }
@@ -183,6 +263,13 @@ function App() {
     })();
   }, [activeContactId, activeAgentProfileId]);
 
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void refreshSessions().catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   async function launchSimulator(): Promise<void> {
     setLoading(true);
     setError(null);
@@ -193,9 +280,31 @@ function App() {
       });
       startTransition(() => {
         setSessionView(session);
+        setSelectedSessionId(session.session.session_id);
       });
+      await refreshSessions();
     } catch (fetchError) {
       setError(fetchError instanceof Error ? fetchError.message : "Unable to start simulator.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function mintClientSecret(): Promise<void> {
+    setLoading(true);
+    setError(null);
+    try {
+      const payload = await apiPost<ClientSecretResponse>("/api/realtime/client-secret", {
+        contact_id: activeContactId,
+        agent_profile_id: activeAgentProfileId,
+      });
+      startTransition(() => {
+        setClientSecretResult(payload);
+        setSelectedSessionId(payload.session_id);
+      });
+      await refreshSessions();
+    } catch (fetchError) {
+      setError(fetchError instanceof Error ? fetchError.message : "Unable to mint client secret.");
     } finally {
       setLoading(false);
     }
@@ -214,7 +323,9 @@ function App() {
       });
       startTransition(() => {
         setSessionView(nextSession);
+        setSelectedSessionId(nextSession.session.session_id);
       });
+      await refreshSessions();
     } catch (fetchError) {
       setError(fetchError instanceof Error ? fetchError.message : "Unable to run next turn.");
     } finally {
@@ -225,15 +336,16 @@ function App() {
   const activeContact = summary?.contacts.find((contact) => contact.id === activeContactId) ?? null;
   const activeAgentProfile =
     summary?.agent_profiles.find((profile) => profile.id === activeAgentProfileId) ?? null;
-  const liveTrace = sessionView?.agent_reply?.trace ?? sessionView?.session.trace ?? [];
-  const compliance = sessionView?.session.compliance ?? sessionPlan?.compliance ?? null;
-  const complianceReasons = compliance?.reasons.length
-    ? compliance.reasons
-    : summary?.compliance_rules ?? [];
+  const ledgerSession = sessionLedger.find((session) => session.session_id === selectedSessionId) ?? null;
+  const activeSession = sessionView?.session.session_id === selectedSessionId ? sessionView.session : ledgerSession ?? sessionView?.session ?? null;
+  const liveTrace = sessionView?.agent_reply?.trace ?? activeSession?.trace ?? [];
+  const compliance = activeSession?.compliance ?? sessionPlan?.compliance ?? null;
+  const complianceReasons = compliance?.reasons.length ? compliance.reasons : summary?.compliance_rules ?? [];
   const missingRequirements = compliance?.missing_requirements ?? [];
-  const runtimePath = sessionView?.session.websocket_path ?? sessionPlan?.websocket_path ?? "/twilio/media-stream/preview";
-  const runtimeDisposition = sessionView?.agent_reply?.disposition ?? sessionView?.session.latest_disposition ?? "continue";
+  const runtimePath = activeSession?.websocket_path ?? sessionPlan?.websocket_path ?? "/twilio/media-stream/preview";
+  const runtimeDisposition = sessionView?.agent_reply?.disposition ?? activeSession?.latest_disposition ?? "continue";
   const planNotes = sessionPlan?.notes ?? [];
+  const runtimeHealth = summary?.runtime_health ?? null;
 
   return (
     <div className="shell">
@@ -243,14 +355,17 @@ function App() {
           <h1>Sonic Calling</h1>
           <p className="hero-body">
             Build production-grade voice agents with a VideoSDK-style developer experience: realtime session
-            templates, Twilio stream ingress, compliance guardrails, tool-aware personas, and a polished
-            operator console for testing every live turn before you deploy.
+            templates, Twilio stream ingress, client-secret minting, runtime observability, compliance guardrails,
+            tool-aware personas, and a polished operator cockpit for testing every live turn before you deploy.
           </p>
         </div>
 
         <div className="hero-actions">
           <button type="button" className="primary-action" onClick={() => void launchSimulator()} disabled={loading}>
             Launch Simulator
+          </button>
+          <button type="button" className="secondary-action" onClick={() => void mintClientSecret()} disabled={loading}>
+            Mint Client Secret
           </button>
           <div className="api-badge">
             <span>OpenAI Realtime</span>
@@ -277,6 +392,31 @@ function App() {
                   <strong>{metric.value}</strong>
                 </article>
               ))}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
+              <span>Runtime readiness</span>
+              <strong>{runtimeHealth?.live_bridge_enabled ? "Live bridge available" : "Simulator fallback"}</strong>
+            </div>
+            <div className="status-grid">
+              <article className="status-card">
+                <span>OpenAI live</span>
+                <strong>{runtimeHealth?.openai_api_configured ? "Configured" : "Missing key"}</strong>
+              </article>
+              <article className="status-card">
+                <span>Twilio live</span>
+                <strong>{runtimeHealth?.twilio_credentials_configured ? "Configured" : "Missing creds"}</strong>
+              </article>
+              <article className="status-card">
+                <span>Input format</span>
+                <strong>{runtimeHealth?.input_audio_format ?? "g711_ulaw"}</strong>
+              </article>
+              <article className="status-card">
+                <span>Turn detection</span>
+                <strong>{runtimeHealth?.turn_detection_mode ?? "server_vad"}</strong>
+              </article>
             </div>
           </section>
 
@@ -331,15 +471,15 @@ function App() {
           <section className="panel simulator-panel">
             <div className="section-header">
               <span>Realtime simulator</span>
-              <strong>{sessionView ? sessionView.session.state : "ready"}</strong>
+              <strong>{activeSession ? activeSession.state : "ready"}</strong>
             </div>
 
             <div className="sim-layout">
               <div className="transcript-card">
                 <h2>Conversation stream</h2>
                 <div className="transcript-feed">
-                  {sessionView?.session.turns.length ? (
-                    sessionView.session.turns.map((turn, index) => (
+                  {activeSession?.turns.length ? (
+                    activeSession.turns.map((turn, index) => (
                       <article key={`${turn.speaker}-${index}`} className={`bubble bubble-${turn.speaker}`}>
                         <span>{turn.speaker}</span>
                         <p>{turn.text}</p>
@@ -401,6 +541,65 @@ function App() {
 
           <section className="panel">
             <div className="section-header">
+              <span>Client secret</span>
+              <strong>{clientSecretResult?.enabled ? "Live ready" : clientSecretResult ? "Preview only" : "Not minted"}</strong>
+            </div>
+            <div className="secret-card">
+              <p>
+                {clientSecretResult?.enabled
+                  ? "Short-lived browser credential minted successfully."
+                  : clientSecretResult?.preview_reason ?? "Generate a realtime client secret for a browser or WebRTC client."}
+              </p>
+              <div className="secret-meta">
+                <span>Session</span>
+                <strong>{clientSecretResult?.session_id ?? "n/a"}</strong>
+              </div>
+              <div className="secret-meta">
+                <span>Expires</span>
+                <strong>
+                  {clientSecretResult?.client_secret?.expires_at
+                    ? new Date(clientSecretResult.client_secret.expires_at * 1000).toLocaleTimeString()
+                    : "n/a"}
+                </strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
+              <span>Bridge telemetry</span>
+              <strong>{activeSession?.runtime.bridge_status ?? "idle"}</strong>
+            </div>
+            <div className="telemetry-grid">
+              <div className="default-row">
+                <span>Mode</span>
+                <strong>{activeSession?.runtime.bridge_mode ?? "simulated"}</strong>
+              </div>
+              <div className="default-row">
+                <span>Stream SID</span>
+                <strong>{activeSession?.runtime.stream_sid ?? "n/a"}</strong>
+              </div>
+              <div className="default-row">
+                <span>Call SID</span>
+                <strong>{activeSession?.runtime.call_sid ?? "n/a"}</strong>
+              </div>
+              <div className="default-row">
+                <span>OpenAI response</span>
+                <strong>{activeSession?.runtime.openai_response_id ?? "n/a"}</strong>
+              </div>
+              <div className="default-row">
+                <span>Twilio events</span>
+                <strong>{activeSession?.runtime.twilio_event_count ?? 0}</strong>
+              </div>
+              <div className="default-row">
+                <span>OpenAI events</span>
+                <strong>{activeSession?.runtime.openai_event_count ?? 0}</strong>
+              </div>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
               <span>Realtime trace</span>
               <strong>{liveTrace.length ? "Live turn events" : "Awaiting session"}</strong>
             </div>
@@ -432,6 +631,31 @@ function App() {
 
           <section className="panel">
             <div className="section-header">
+              <span>Event timeline</span>
+              <strong>{activeSession?.events.length ?? 0} events</strong>
+            </div>
+            <div className="event-list">
+              {(activeSession?.events ?? []).length ? (
+                activeSession?.events.map((event, index) => (
+                  <article key={`${event.event}-${index}`} className="event-card">
+                    <div className="trace-topline">
+                      <strong>{event.source}</strong>
+                      <span>{event.event}</span>
+                    </div>
+                    <p>{event.detail}</p>
+                    <small>{formatTimestamp(event.timestamp)}</small>
+                  </article>
+                ))
+              ) : (
+                <div className="trace-card">
+                  <p>No bridge events yet.</p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
               <span>Compliance watch</span>
               <strong>{compliance ? formatRiskLabel(compliance.risk_level) : "loading..."}</strong>
             </div>
@@ -454,6 +678,30 @@ function App() {
                   </ul>
                 </>
               ) : null}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="section-header">
+              <span>Session ledger</span>
+              <strong>{sessionLedger.length} tracked</strong>
+            </div>
+            <div className="ledger-list">
+              {sessionLedger.map((session) => (
+                <button
+                  type="button"
+                  key={session.session_id}
+                  className={`ledger-card ${session.session_id === selectedSessionId ? "ledger-card-active" : ""}`}
+                  onClick={() => setSelectedSessionId(session.session_id)}
+                >
+                  <div className="trace-topline">
+                    <strong>{session.contact.full_name}</strong>
+                    <span>{session.state}</span>
+                  </div>
+                  <p>{session.agent_profile.name}</p>
+                  <small>{formatTimestamp(session.created_at)}</small>
+                </button>
+              ))}
             </div>
           </section>
 

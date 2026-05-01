@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
+
 from pydantic import BaseModel, Field
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class ProviderName(str, Enum):
@@ -65,6 +71,32 @@ class RealtimeTrace(BaseModel):
     used_fallback: bool = False
 
 
+class StreamEvent(BaseModel):
+    source: Literal["twilio", "openai", "system"]
+    event: str
+    detail: str
+    timestamp: str = Field(default_factory=utc_now)
+    payload_preview: dict[str, Any] = Field(default_factory=dict)
+
+
+class SessionRuntime(BaseModel):
+    bridge_mode: Literal["simulated", "openai_realtime"] = "simulated"
+    bridge_status: Literal["idle", "connecting", "streaming", "closed", "error"] = "idle"
+    input_audio_format: str = "g711_ulaw"
+    output_audio_format: str = "g711_ulaw"
+    stream_sid: str | None = None
+    call_sid: str | None = None
+    openai_response_id: str | None = None
+    twilio_event_count: int = 0
+    openai_event_count: int = 0
+    latest_mark: str | None = None
+    last_input_transcript: str = ""
+    last_output_transcript: str = ""
+    last_tool_name: str | None = None
+    last_tool_arguments: str | None = None
+    last_error: str | None = None
+
+
 class AgentReply(BaseModel):
     reply: str
     next_state: SessionState
@@ -79,9 +111,12 @@ class RealtimeSession(BaseModel):
     contact: ContactProfile
     agent_profile: AgentProfile
     state: SessionState
+    created_at: str = Field(default_factory=utc_now)
     started: bool = False
     turns: list[ConversationTurn] = Field(default_factory=list)
     trace: list[RealtimeTrace] = Field(default_factory=list)
+    events: list[StreamEvent] = Field(default_factory=list)
+    runtime: SessionRuntime = Field(default_factory=SessionRuntime)
     compliance: ComplianceResult
     latest_reply: str = ""
     latest_disposition: str = "continue"
@@ -103,10 +138,28 @@ class SessionView(BaseModel):
     agent_reply: AgentReply | None = None
 
 
+class SessionCollectionView(BaseModel):
+    sessions: list[RealtimeSession]
+
+
 class DashboardMetric(BaseModel):
     label: str
     value: str
     tone: Literal["primary", "neutral", "warning"]
+
+
+class RuntimeHealth(BaseModel):
+    openai_api_configured: bool
+    twilio_credentials_configured: bool
+    live_bridge_enabled: bool
+    client_secret_enabled: bool
+    public_base_url: str
+    public_websocket_base: str
+    openai_websocket_url: str
+    input_audio_format: str
+    output_audio_format: str
+    transcription_model: str
+    turn_detection_mode: str
 
 
 class DashboardSummary(BaseModel):
@@ -118,6 +171,7 @@ class DashboardSummary(BaseModel):
     provider_defaults: dict[str, str]
     compliance_rules: list[str]
     platform_surfaces: list[dict[str, str]]
+    runtime_health: RuntimeHealth
 
 
 class SessionPlanResponse(BaseModel):
@@ -129,3 +183,16 @@ class SessionPlanResponse(BaseModel):
     websocket_path: str
     compliance: ComplianceResult
     notes: list[str]
+
+
+class RealtimeClientSecret(BaseModel):
+    value: str
+    expires_at: int
+
+
+class RealtimeClientSecretResponse(BaseModel):
+    enabled: bool
+    session_id: str
+    session: dict[str, Any]
+    client_secret: RealtimeClientSecret | None = None
+    preview_reason: str | None = None
