@@ -1,5 +1,17 @@
 # Sonic Calling
 
+<!-- portfolio-seo:start -->
+![Stars](https://img.shields.io/github/stars/Crynge/sonic-calling?style=flat-square) ![License](https://img.shields.io/github/license/Crynge/sonic-calling?style=flat-square) ![Status](https://img.shields.io/badge/status-active-blue?style=flat-square)
+
+![Social Preview](docs/social-preview.png)
+
+> Realtime AI telephony platform with Twilio Voice, OpenAI Realtime sessions, BYO provider tools, and operator controls.
+
+**GitHub Search Keywords:** realtime ai calling, twilio openai realtime, voice ai platform, telephony developer platform, call agent infrastructure, realtime voice api
+
+<!-- portfolio-seo:end -->
+
+
 A developer-first realtime voice platform for building AI phone agents with **OpenAI Realtime**, **Twilio telephony**, a **bring-your-own API vault**, and a **tool execution mesh**.
 
 Sonic Calling is intentionally shaped more like a **VideoSDK-style developer platform** than a one-off bot demo. The repo now includes:

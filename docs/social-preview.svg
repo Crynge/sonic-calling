@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="Sonic Calling social preview">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#08131f" />
+      <stop offset="100%" stop-color="#10253b" />
+    </linearGradient>
+    <linearGradient id="flare" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff7a45" stop-opacity="0.7" />
+      <stop offset="100%" stop-color="#6fc2ff" stop-opacity="0.25" />
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" rx="40" fill="url(#bg)" />
+  <circle cx="1080" cy="110" r="220" fill="url(#flare)" opacity="0.35" />
+  <circle cx="150" cy="520" r="180" fill="#ff7a45" opacity="0.12" />
+  <text x="72" y="92" fill="#6fc2ff" font-size="28" font-family="Segoe UI, Arial, sans-serif" letter-spacing="4">CRYNGE ? OPEN SOURCE</text>
+  <text x="72" y="190" fill="#edf4ff" font-size="68" font-weight="700" font-family="Segoe UI, Arial, sans-serif">Sonic Calling</text>
+  <foreignObject x="72" y="228" width="1040" height="170">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Segoe UI,Arial,sans-serif;font-size:30px;line-height:1.35;color:#c8d8e8;">
+      Realtime AI telephony platform with Twilio Voice, OpenAI Realtime sessions, BYO provider tools, and operator controls.
+    </div>
+  </foreignObject>
+  <foreignObject x="72" y="430" width="1120" height="120">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="display:flex;flex-wrap:wrap;gap:12px;font-family:Segoe UI,Arial,sans-serif;font-size:22px;color:#edf4ff;">
+      <span style="padding:10px 16px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);">realtime ai calling</span><span style="padding:10px 16px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);">twilio openai realtime</span><span style="padding:10px 16px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);">voice ai platform</span><span style="padding:10px 16px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.1);">telephony developer platform</span>
+    </div>
+  </foreignObject>
+  <text x="72" y="590" fill="#9eb4c7" font-size="24" font-family="Segoe UI, Arial, sans-serif">github.com/Crynge/sonic-calling</text>
+</svg>
