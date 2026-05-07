@@ -1,0 +1,47 @@
+name: Repository Health
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-health-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  standards:
+    name: Validate repository standards
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify maintainer-facing files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f README.md
+          test -f AUTHORS.md
+          test -f CONTRIBUTING.md
+          test -f SECURITY.md
+          test -f .github/CODEOWNERS
+          test -f .github/PULL_REQUEST_TEMPLATE.md
+          test -f .github/ISSUE_TEMPLATE/bug_report.yml
+          test -f .github/ISSUE_TEMPLATE/feature_request.yml
+          test -f docs/social-preview.png
+          test -f docs/social-preview.svg
+
+      - name: Verify maintainer attribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "Sameer Alam" AUTHORS.md
+          grep -q "portfolio-seo:start" README.md
+          grep -q "portfolio-links:start" README.md

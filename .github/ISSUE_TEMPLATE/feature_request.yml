@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a meaningful improvement for this repository.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem should this solve?
+      description: Describe the user or maintainer pain clearly.
+      placeholder: The current workflow makes it hard to...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the improvement you want to see.
+      placeholder: Add a new command, workflow, screen, or integration that...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Share any workarounds or alternative approaches.

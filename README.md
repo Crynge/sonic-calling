@@ -11,6 +11,15 @@
 
 <!-- portfolio-seo:end -->
 
+<!-- portfolio-links:start -->
+<div align="center">
+
+[Documentation](docs) &middot; [Architecture](docs/architecture.md) &middot; [Audit](docs/audit.md) &middot; [Contributing](CONTRIBUTING.md) &middot; [Security](SECURITY.md) &middot; [Authors](AUTHORS.md) &middot; [Workflows](.github/workflows)
+
+</div>
+<!-- portfolio-links:end -->
+
+
 
 A developer-first realtime voice platform for building AI phone agents with **OpenAI Realtime**, **Twilio telephony**, a **bring-your-own API vault**, and a **tool execution mesh**.
 
